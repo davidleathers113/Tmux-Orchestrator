@@ -1,0 +1,47 @@
+# Configuration files (contain environment-specific settings)
+config/orchestrator.conf
+
+# Log files
+logs/*.log
+logs/.command_count
+logs/.last_minute
+
+# Temporary files
+*.tmp
+*.bak
+*.swp
+*~
+
+# PID files
+*.pid
+
+# Test outputs
+test-results/
+coverage/
+
+# OS-specific files
+.DS_Store
+Thumbs.db
+
+# Editor files
+.vscode/
+.idea/
+*.sublime-*
+
+# Python cache (for orchestrator.py)
+__pycache__/
+*.pyc
+*.pyo
+
+# Backup files
+*.backup
+*.old
+
+# Local development
+.env
+.env.local
+
+# Security-sensitive files
+*.key
+*.pem
+*.crt

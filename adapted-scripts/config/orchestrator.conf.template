@@ -1,0 +1,80 @@
+# Tmux Orchestrator Configuration Template
+# Copy this file to orchestrator.conf and customize for your environment
+
+# Base directory for the orchestrator installation
+ORCHESTRATOR_HOME="/path/to/tmux-orchestrator"
+
+# Project directory where tmux sessions will be managed
+PROJECT_DIR="/path/to/your/project"
+
+# Directory for log files
+LOG_DIR="${ORCHESTRATOR_HOME}/adapted-scripts/logs"
+
+# Security: Whitelist of allowed commands that can be sent to tmux windows
+# Add only commands that are necessary for your workflow
+ALLOWED_COMMANDS=(
+    "python3 claude_control.py"
+    "python3 tmux_utils.py"
+    "cat"
+    "ls"
+    "pwd"
+    "echo"
+    "date"
+    # Add more allowed commands as needed
+)
+
+# Maximum number of background processes that can be scheduled
+MAX_BACKGROUND_PROCESSES=5
+
+# Enable audit logging for all commands sent to tmux windows
+AUDIT_LOGGING=true
+
+# Log retention in days
+LOG_RETENTION_DAYS=30
+
+# Default timeout for background processes (in seconds)
+PROCESS_TIMEOUT=3600
+
+# Enable command sanitization (recommended)
+ENABLE_SANITIZATION=true
+
+# Restrict tmux operations to specific sessions (comma-separated)
+# Leave empty to allow all sessions
+ALLOWED_SESSIONS=""
+
+# Default number of lines to capture from tmux windows
+DEFAULT_CAPTURE_LINES=50
+
+# Maximum number of lines that can be captured (security limit)
+MAX_CAPTURE_LINES=1000
+
+# Enable dry-run mode by default (commands are logged but not executed)
+DRY_RUN_DEFAULT=false
+
+# Path to store temporary files (must be writable)
+TEMP_DIR="/tmp/tmux-orchestrator"
+
+# Enable strict mode (exit on any error)
+STRICT_MODE=true
+
+# User notification settings
+NOTIFY_ON_ERROR=true
+NOTIFY_ON_SCHEDULE=true
+
+# Security: Disable execution of scripts from untrusted sources
+ALLOW_EXTERNAL_SCRIPTS=false
+
+# Rate limiting: Maximum commands per minute
+MAX_COMMANDS_PER_MINUTE=30
+
+# Session validation: Check if target session exists before sending commands
+VALIDATE_SESSIONS=true
+
+# Command validation: Check syntax before execution
+VALIDATE_COMMANDS=true
+
+# Enable colored output
+USE_COLORS=true
+
+# Debug mode (verbose logging)
+DEBUG=false
