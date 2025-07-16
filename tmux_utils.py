@@ -3,6 +3,8 @@
 import subprocess
 import json
 import time
+import threading
+import queue
 from typing import List, Dict, Optional, Tuple
 from dataclasses import dataclass
 from datetime import datetime
@@ -20,72 +22,171 @@ class TmuxSession:
     windows: List[TmuxWindow]
     attached: bool
 
+class TmuxError(Exception):
+    """Base exception for tmux operations"""
+    pass
+
 class TmuxOrchestrator:
-    def __init__(self):
-        self.safety_mode = True
+    def __init__(self, safety_mode: bool = True, cmd_timeout: int = 10):
+        self._safety_mode = safety_mode  # Make immutable
         self.max_lines_capture = 1000
+        self.CMD_TIMEOUT = cmd_timeout
+        self.max_lines_per_pane = 20  # Conservative default
+    
+    @property
+    def safety_mode(self) -> bool:
+        """Read-only safety mode property"""
+        return self._safety_mode
+    
+    def _safe_subprocess_large_output(self, cmd: List[str], timeout: int = None) -> Tuple[str, str, int]:
+        """Safely run subprocess with large output handling to prevent deadlocks"""
+        if timeout is None:
+            timeout = self.CMD_TIMEOUT
+            
+        proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+        try:
+            stdout, stderr = proc.communicate(timeout=timeout)
+            return stdout, stderr, proc.returncode
+        except subprocess.TimeoutExpired:
+            proc.kill()
+            stdout, stderr = proc.communicate()  # Clean up
+            raise TmuxError(f"Command timeout after {timeout}s: {cmd}")
+    
+    def _safe_subprocess_stream(self, cmd: List[str], timeout: int = None) -> str:
+        """Stream subprocess output to prevent memory exhaustion"""
+        if timeout is None:
+            timeout = self.CMD_TIMEOUT
+            
+        proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+        start_time = time.time()
+        chunks = []
+        
+        try:
+            for line in iter(proc.stdout.readline, ""):
+                chunks.append(line)
+                if time.time() - start_time > timeout:
+                    proc.kill()
+                    raise TmuxError(f"Command timeout after {timeout}s: {cmd}")
+                
+                # Memory safety: limit total size
+                if len(chunks) > self.max_lines_capture:
+                    break
+                    
+            proc.wait()
+            return "".join(chunks)
+        except Exception:
+            proc.kill()
+            raise
+    
+    def _safe_confirm(self, prompt: str, timeout: float = 5.0) -> bool:
+        """Cross-platform safe confirmation with timeout"""
+        result_queue = queue.Queue()
+        
+        def get_input():
+            try:
+                response = input(prompt)
+                result_queue.put(response.strip().lower())
+            except EOFError:
+                result_queue.put("")
+        
+        thread = threading.Thread(target=get_input)
+        thread.daemon = True
+        thread.start()
+        
+        try:
+            response = result_queue.get(timeout=timeout)
+            return response == "yes"
+        except queue.Empty:
+            return False
         
     def get_tmux_sessions(self) -> List[TmuxSession]:
-        """Get all tmux sessions and their windows"""
+        """Get all tmux sessions and their windows with batched queries"""
         try:
             # Get sessions
             sessions_cmd = ["tmux", "list-sessions", "-F", "#{session_name}:#{session_attached}"]
-            sessions_result = subprocess.run(sessions_cmd, capture_output=True, text=True, check=True)
+            sessions_stdout, sessions_stderr, return_code = self._safe_subprocess_large_output(sessions_cmd)
+            if return_code != 0:
+                raise TmuxError(f"Failed to get sessions: {sessions_stderr}")
             
-            sessions = []
-            for line in sessions_result.stdout.strip().split('\n'):
+            # Batch query all windows across all sessions
+            windows_cmd = [
+                "tmux", "list-windows", "-a", 
+                "-F", "#{session_name}:#{window_index}:#{window_name}:#{window_active}"
+            ]
+            windows_stdout, windows_stderr, return_code = self._safe_subprocess_large_output(windows_cmd)
+            if return_code != 0:
+                raise TmuxError(f"Failed to get all windows: {windows_stderr}")
+            
+            # Parse sessions
+            session_data = {}
+            for line in sessions_stdout.strip().split('\n'):
                 if not line:
                     continue
                 session_name, attached = line.split(':')
-                
-                # Get windows for this session
-                windows_cmd = ["tmux", "list-windows", "-t", session_name, "-F", "#{window_index}:#{window_name}:#{window_active}"]
-                windows_result = subprocess.run(windows_cmd, capture_output=True, text=True, check=True)
-                
-                windows = []
-                for window_line in windows_result.stdout.strip().split('\n'):
-                    if not window_line:
-                        continue
-                    window_index, window_name, window_active = window_line.split(':')
-                    windows.append(TmuxWindow(
-                        session_name=session_name,
-                        window_index=int(window_index),
-                        window_name=window_name,
-                        active=window_active == '1'
-                    ))
-                
+                session_data[session_name] = {
+                    'attached': attached == '1',
+                    'windows': []
+                }
+            
+            # Parse and group windows by session
+            for window_line in windows_stdout.strip().split('\n'):
+                if not window_line:
+                    continue
+                parts = window_line.split(':')
+                if len(parts) >= 4:
+                    session_name, window_index, window_name, window_active = parts[0], parts[1], parts[2], parts[3]
+                    if session_name in session_data:
+                        session_data[session_name]['windows'].append(TmuxWindow(
+                            session_name=session_name,
+                            window_index=int(window_index),
+                            window_name=window_name,
+                            active=window_active == '1'
+                        ))
+            
+            # Build session objects
+            sessions = []
+            for session_name, data in session_data.items():
                 sessions.append(TmuxSession(
                     name=session_name,
-                    windows=windows,
-                    attached=attached == '1'
+                    windows=data['windows'],
+                    attached=data['attached']
                 ))
             
             return sessions
-        except subprocess.CalledProcessError as e:
-            print(f"Error getting tmux sessions: {e}")
-            return []
+        except (subprocess.CalledProcessError, TmuxError) as e:
+            raise TmuxError(f"Error getting tmux sessions: {e}") from e
     
     def capture_window_content(self, session_name: str, window_index: int, num_lines: int = 50) -> str:
-        """Safely capture the last N lines from a tmux window"""
+        """Safely capture the last N lines from a tmux window with streaming"""
         if num_lines > self.max_lines_capture:
             num_lines = self.max_lines_capture
             
         try:
             cmd = ["tmux", "capture-pane", "-t", f"{session_name}:{window_index}", "-p", "-S", f"-{num_lines}"]
-            result = subprocess.run(cmd, capture_output=True, text=True, check=True)
-            return result.stdout
-        except subprocess.CalledProcessError as e:
-            return f"Error capturing window content: {e}"
+            
+            # Use streaming for large captures
+            if num_lines > 100:
+                return self._safe_subprocess_stream(cmd)
+            else:
+                stdout, stderr, return_code = self._safe_subprocess_large_output(cmd)
+                if return_code != 0:
+                    raise TmuxError(f"Failed to capture window content: {stderr}")
+                return stdout
+        except (subprocess.CalledProcessError, TmuxError) as e:
+            raise TmuxError(f"Error capturing window content: {e}") from e
     
     def get_window_info(self, session_name: str, window_index: int) -> Dict:
         """Get detailed information about a specific window"""
         try:
             cmd = ["tmux", "display-message", "-t", f"{session_name}:{window_index}", "-p", 
                    "#{window_name}:#{window_active}:#{window_panes}:#{window_layout}"]
-            result = subprocess.run(cmd, capture_output=True, text=True, check=True)
+            stdout, stderr, return_code = self._safe_subprocess_large_output(cmd)
             
-            if result.stdout.strip():
-                parts = result.stdout.strip().split(':')
+            if return_code != 0:
+                raise TmuxError(f"Failed to get window info: {stderr}")
+            
+            if stdout.strip():
+                parts = stdout.strip().split(':')
                 return {
                     "name": parts[0],
                     "active": parts[1] == '1',
@@ -93,25 +194,27 @@ class TmuxOrchestrator:
                     "layout": parts[3],
                     "content": self.capture_window_content(session_name, window_index)
                 }
-        except subprocess.CalledProcessError as e:
-            return {"error": f"Could not get window info: {e}"}
+        except (subprocess.CalledProcessError, TmuxError) as e:
+            raise TmuxError(f"Could not get window info: {e}") from e
     
     def send_keys_to_window(self, session_name: str, window_index: int, keys: str, confirm: bool = True) -> bool:
         """Safely send keys to a tmux window with confirmation"""
         if self.safety_mode and confirm:
-            print(f"SAFETY CHECK: About to send '{keys}' to {session_name}:{window_index}")
-            response = input("Confirm? (yes/no): ")
-            if response.lower() != 'yes':
+            prompt = f"SAFETY CHECK: About to send '{keys}' to {session_name}:{window_index}\nConfirm? (yes/no): "
+            if not self._safe_confirm(prompt):
                 print("Operation cancelled")
                 return False
         
         try:
-            cmd = ["tmux", "send-keys", "-t", f"{session_name}:{window_index}", keys]
-            subprocess.run(cmd, check=True)
+            # Escape special characters to prevent command injection
+            safe_keys = keys.replace(";", r"\;").replace("$", r"\$").replace("`", r"\`")
+            cmd = ["tmux", "send-keys", "-l", "-t", f"{session_name}:{window_index}", safe_keys]
+            stdout, stderr, return_code = self._safe_subprocess_large_output(cmd)
+            if return_code != 0:
+                raise TmuxError(f"Failed to send keys: {stderr}")
             return True
-        except subprocess.CalledProcessError as e:
-            print(f"Error sending keys: {e}")
-            return False
+        except (subprocess.CalledProcessError, TmuxError) as e:
+            raise TmuxError(f"Error sending keys: {e}") from e
     
     def send_command_to_window(self, session_name: str, window_index: int, command: str, confirm: bool = True) -> bool:
         """Send a command to a window (adds Enter automatically)"""
@@ -121,11 +224,12 @@ class TmuxOrchestrator:
         # Then send the actual Enter key (C-m)
         try:
             cmd = ["tmux", "send-keys", "-t", f"{session_name}:{window_index}", "C-m"]
-            subprocess.run(cmd, check=True)
+            stdout, stderr, return_code = self._safe_subprocess_large_output(cmd)
+            if return_code != 0:
+                raise TmuxError(f"Failed to send Enter key: {stderr}")
             return True
-        except subprocess.CalledProcessError as e:
-            print(f"Error sending Enter key: {e}")
-            return False
+        except (subprocess.CalledProcessError, TmuxError) as e:
+            raise TmuxError(f"Error sending Enter key: {e}") from e
     
     def get_all_windows_status(self) -> Dict:
         """Get status of all windows across all sessions"""
