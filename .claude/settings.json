@@ -1,6 +1,6 @@
 {
     "permissions": {
-      "additionalDirectories": ["/Users/davidleathers/dce-whiteboard"],
+      "additionalDirectories": ["/Users/davidleathers/"],
       "allow": [
         "Write",
         "MultiEdit",

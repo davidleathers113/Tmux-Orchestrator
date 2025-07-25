@@ -92,8 +92,8 @@ execute_scheduled_check() {
     # Set cleanup trap inside the scheduled task
     trap 'rm -rf "$(dirname "$note_file")"' EXIT INT TERM
     
-    # Send notification with proper escaping
-    tmux send-keys -l -t "$target" "Time for orchestrator check! cat \"$note_file\"" || {
+    # Send notification with proper escaping - use echo to prevent command interpretation
+    tmux send-keys -l -t "$target" "echo 'Time for orchestrator check!' && cat \"$note_file\"" || {
         logger -t "schedule_with_note" "Failed to send notification to $target"
         exit 70
     }
